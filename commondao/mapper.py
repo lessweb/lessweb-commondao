@@ -76,7 +76,7 @@ def make_sub_clause(query) -> tuple:
     query: Dict | MutableMapping
     return: (value_map, limit_map, where_clause, order_clause, limit_clause)
     """
-    eq_filter = '<field>=:<field>.value'
+    eq_filter = '`<field>`=:<field>.value'
     filter_map = {}  # filter_map[query_key] = filter
     limit_map = {'limit': 1000}
     orderby_rules = []
@@ -124,9 +124,9 @@ class Mapper:
 
     async def execute(self, mode, sql: str, data: dict):
         cursor = self.conn.cur
-        logging.info(sql)
+        logging.debug(sql)
         pg_sql, pg_params = RegexCollect().build(sql, data)
-        logging.info('%s => %s', pg_sql, pg_params)
+        logging.debug('%s => %s', pg_sql, pg_params)
         await cursor.execute(pg_sql, pg_params)
         if mode == SELECT_ONE:
             return await cursor.fetchone() or {}
@@ -159,7 +159,7 @@ class Mapper:
             'insert into',
             tablename,
             '(',
-            join(*selected_data.keys()),
+            join(*[f'`{key}`' for key in selected_data.keys()]),
             ') values (',
             join(*[f':{key}' for key in selected_data.keys()]),
             ')',
@@ -177,9 +177,9 @@ class Mapper:
             'update',
             tablename,
             'set',
-            join(*[f'{k}=:{k}' for k in selected_data.keys()], ),
+            join(*[f'`{k}`=:{k}' for k in selected_data.keys()], ),
             'where',
-            and_(*[f'{k}=:{k}' for k in key.keys()]),
+            and_(*[f'`{k}`=:{k}' for k in key.keys()]),
         )
         return await self.update(sql, {**data, **key})
 
@@ -188,13 +188,13 @@ class Mapper:
             'delete from',
             tablename,
             'where',
-            and_(*[f'{k}=:{k}' for k in key.keys()]),
+            and_(*[f'`{k}`=:{k}' for k in key.keys()]),
         )
         return await self.delete(sql, key)
 
     async def get_by_key(self, tablename, *, key: dict):
         sql = script('select * from', tablename,
-                     where(and_(*[f'{k}=:{k}' for k in key.keys()])),
+                     where(and_(*[f'`{k}`=:{k}' for k in key.keys()])),
                      'limit 1')
         return await self.select_one(sql, key)
 
