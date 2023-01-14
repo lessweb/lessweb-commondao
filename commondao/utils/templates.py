@@ -1,7 +1,17 @@
 def render_class_frame(class_body):
-    return f"""from commondao.mapper import Mapper
+    return f"""from typing import Optional, List
+from commondao.mapper import Mapper
+from dataclasses import dataclass
 from datetime import datetime, date
 from lessweb.bridge import service
+
+
+@dataclass
+class QueryResult:
+    total: int
+    list: List[dict]
+    limit: Optional[int] = None
+    offset: Optional[int] = None
 
 
 @service
@@ -33,8 +43,9 @@ def render_class_methods(table_name, entity_name, col_items, unique_keys):
         }}
         return await self.save('{table_name}', data=data)
     
-    async def select_{entity_name}(self, query, select_clause: str = '*', extra: dict = None):
-        return await self.select_by_query('{table_name}', query, select_clause, extra)
+    async def select_{entity_name}(self, query, select_clause: str = '*', extra: dict = None) -> QueryResult:
+        result = await self.select_by_query('{table_name}', query, select_clause, extra)
+        return QueryResult(**result)
     {by_key_methods}
 """
 
@@ -66,26 +77,26 @@ def render_by_key_method(table_name, entity_name, col_items, unique_key: list):
         data = {{
 {data_rows}
         }}
-        key = {{
+        keys = {{
 {key_rows}
         }}
-        return await self.update_by_key('{table_name}', key=key, data=data)
+        return await self.update_by_key('{table_name}', key=keys, data=data)
     
     async def delete_{entity_name}_by_{key_name}(
         self,
 {args}
     ):
-        key = {{
+        keys = {{
 {key_rows}
         }}
-        return await self.delete_by_key('{table_name}', key=key)
+        return await self.delete_by_key('{table_name}', key=keys)
     
     async def get_{entity_name}_by_{key_name}(
         self,
 {args}
     ):
-        key = {{
+        keys = {{
 {key_rows}
         }}
-        return await self.get_by_key('{table_name}', key=key)
+        return await self.get_by_key('{table_name}', key=keys)
 """
