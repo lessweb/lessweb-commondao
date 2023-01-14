@@ -27,6 +27,9 @@ setup(
             ],
         keywords='lessweb mysql',
         packages=['commondao', 'commondao.utils'],
+        package_data={
+            'commondao': ['py.typed'],
+        },
         install_requires=['aiohttp', 'lesscli', 'lessweb', 'mysql-connector', 'aiomysql'],
         entry_points={
             'console_scripts': [
