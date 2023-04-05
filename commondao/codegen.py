@@ -6,7 +6,7 @@ from commondao.utils.templates import render_class_frame, render_class_methods
 from commondao.utils.grammar import is_column_sql, parse_column_sql, guess_py_type, is_unique_key_sql, parse_unique_key_sql
 
 
-def parse_create_table_sql(sql_content):
+def parse_create_table_sql(sql_content, entity_filename):
     """
     :return 形如table_name, col_items, unique_keys
        * col_items: dict[name, (py_type, comment)]
@@ -17,7 +17,8 @@ def parse_create_table_sql(sql_content):
     seed = re.compile(r'CREATE TABLE *`?(\w+)`? *\((.*)\)',
                       flags=re.I | re.DOTALL)
     match_size = len(find_ret := seed.findall(sql_content))
-    assert match_size == 1, 'cannot parse the create table SQL'
+    assert match_size != 0, f'cannot parse the create table SQL (No "CREATE TABLE ..." in {entity_filename})'
+    assert match_size == 1, f'cannot parse the create table SQL (Too many "CREATE TABLE ..." in {entity_filename})'
     table_name, sql_body = find_ret[0]
     for sql_line in sql_body.splitlines():
         if sql_line and is_column_sql(sql_line):
@@ -49,7 +50,7 @@ def run_codegen(schemadir, outfile):
         entity_name = entity_filename.split('.', 1)[0]
         sql_content = (schema_path / entity_filename).open().read()
         table_name, col_items, unique_keys = parse_create_table_sql(
-            sql_content)
+            sql_content, entity_filename)
         class_methods = render_class_methods(table_name, entity_name,
                                              col_items, unique_keys)
         class_body_blocks.append(class_methods)

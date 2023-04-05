@@ -15,6 +15,19 @@ SELECT_ALL = 2
 EXECUTE = 3
 
 
+FILTER_MAP = {
+    'eq': '`<field>`=:<field>.value',  # eq是默认的filter，可以省略
+    'contains': "`<field>` like concat('%', :<field>.value, '%')",
+    'between': '`<field>` between :<field>.value and :<field>.end',
+    'ne': '`<field>` <> :<field>.value',
+    'lt': '`<field>` < :<field>.value',
+    'gt': '`<field>` > :<field>.value',
+    'lte': '`<field>` <= :<field>.value',
+    'gte': '`<field>` >= :<field>.value',
+    'in': '`<field>` in :<field>.value',
+}
+
+
 @service
 class Mysql:
     app: Application
@@ -76,26 +89,24 @@ def make_sub_clause(query) -> tuple:
     query: Dict | MutableMapping
     return: (value_map, limit_map, where_clause, order_clause, limit_clause)
     """
-    eq_filter = '`<field>`=:<field>.value'
     filter_map = {}  # filter_map[query_key] = filter
-    limit_map = {'limit': 1000}
+    limit_map = {'limit': 0}
     orderby_rules = []
     value_map = {}
     for query_key, query_val in query.items():
         if query_key == 'limit':
             limit_map['limit'] = int(query_val)
         elif query_key == 'offset':
-            limit_map['offset'] = int(
-                query_val
-            )  # todo 如果传入的limit=0，则只查询总数；否则正常分页查询。如果不传limit则默认1000。
+            limit_map['offset'] = int(query_val)
         elif '.' not in query_key:
-            filter_map.setdefault(query_key, eq_filter.replace('<field>', query_key))
+            filter_map.setdefault(query_key, 'eq')
             value_map[f'{query_key}.value'] = query_val
         elif query_key.endswith('.value'):
-            filter_map.setdefault(query_key[:-6], eq_filter.replace('<field>', query_key[:-6]))
+            filter_map.setdefault(query_key[:-6], 'eq')
             value_map[query_key] = query_val
         elif query_key.endswith('.filter'):
-            filter_map[query_key[:-7]] = query_val.replace('<field>', query_key[:-7])
+            assert query_val in FILTER_MAP
+            filter_map[query_key[:-7]] = query_val
         elif query_key.endswith('.order'):
             assert query_val in 'asc' or query_val in 'desc'
             orderby_rules.append(query_key[:-6] + ' ' + query_val)
@@ -104,9 +115,10 @@ def make_sub_clause(query) -> tuple:
     where_clause = ''
     order_clause = ', '.join(orderby_rules)
     limit_clause = 'limit %d' % int(limit_map['limit'])
-    for filter_val in filter_map.values():
+    for field_name, filter_val in filter_map.items():
+        filter_text = FILTER_MAP[filter_val].replace('<field>', field_name)
         where_clause += ('WHERE' if not where_clause else 'AND')\
-                        + f' ({filter_val}) '
+                        + f' ({filter_text}) '
     if 'offset' in limit_map:
         limit_clause += ' offset %d' % int(limit_map['offset'])
     return value_map, limit_map, where_clause, order_clause, limit_clause
