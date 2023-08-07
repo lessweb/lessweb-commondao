@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lessweb-commondao"
+version = "1.0.6"
+description = 'Mysql service and toolkit for lessweb'
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ['lessweb', 'mysql']
+authors = [
+    {name = "qorzj", email = "goodhorsezxj@gmail.com"},
+]
+license = {text = "Apache 2"}
+dependencies = [
+    'aiohttp',
+    'lesscli',
+    'lessweb',
+    'mysql-connector',
+    'aiomysql'
+]
+
+[project.scripts]
+commondao = "commondao.index:main"

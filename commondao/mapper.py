@@ -17,7 +17,7 @@ EXECUTE = 3
 
 FILTER_MAP = {
     'eq': '`<field>`=:<field>.value',  # eq是默认的filter，可以省略
-    'contains': "`<field>` like concat('%', :<field>.value, '%')",
+    'like': "`<field>` like :<field>.value",
     'between': '`<field>` between :<field>.value and :<field>.end',
     'ne': '`<field>` <> :<field>.value',
     'lt': '`<field>` < :<field>.value',
@@ -98,6 +98,11 @@ def make_sub_clause(query) -> tuple:
             limit_map['limit'] = int(query_val)
         elif query_key == 'offset':
             limit_map['offset'] = int(query_val)
+        elif query_key == 'order':
+            orderby_rules.extend(
+                (f'{k[1:]} desc' if k.startswith('-') else k) 
+                for k in query_val.split(',') if re.match(r'-?[\w]+', k)
+            )
         elif '.' not in query_key:
             filter_map.setdefault(query_key, 'eq')
             value_map[f'{query_key}.value'] = query_val
@@ -107,9 +112,6 @@ def make_sub_clause(query) -> tuple:
         elif query_key.endswith('.filter'):
             assert query_val in FILTER_MAP
             filter_map[query_key[:-7]] = query_val
-        elif query_key.endswith('.order'):
-            assert query_val in 'asc' or query_val in 'desc'
-            orderby_rules.append(query_key[:-6] + ' ' + query_val)
         else:
             value_map[query_key] = query_val
     where_clause = ''
@@ -143,7 +145,7 @@ class Mapper:
         if mode == SELECT_ONE:
             return await cursor.fetchone() or {}
         elif mode == SELECT_ALL:
-            return await cursor.fetchall()
+            return await cursor.fetchall() or []
         else:
             return cursor.rowcount
 
