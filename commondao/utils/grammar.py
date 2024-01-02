@@ -56,5 +56,7 @@ def guess_py_type(sql_type):
         return 'str'  # 后续改进
     elif sql_type.startswith('tinyint'):
         return 'bool'
+    elif sql_type.startswith('double'):
+        return 'float'
     else:
         return 'str'
