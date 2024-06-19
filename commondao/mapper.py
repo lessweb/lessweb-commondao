@@ -1,12 +1,14 @@
-from aiohttp.web import Application, Request
-import aiomysql  # type: ignore
-from aiomysql import Pool, Connection, Cursor, DictCursor
-from lessweb.bridge import service
 import logging
 import re
 from re import Match
 from typing import TypeVar
-from commondao.utils.common import script, and_, join, where
+
+import aiomysql  # type: ignore
+from aiohttp.web import Application, Request
+from aiomysql import Connection, Cursor, DictCursor, Pool
+from lessweb.bridge import config, service
+
+from commondao.utils.common import and_, join, script, where
 
 T = TypeVar('T')
 
@@ -28,7 +30,7 @@ FILTER_MAP = {
 }
 
 
-@service
+@config
 class Mysql:
     app: Application
     pool: Pool
@@ -100,7 +102,7 @@ def make_sub_clause(query) -> tuple:
             limit_map['offset'] = int(query_val)
         elif query_key == 'order':
             orderby_rules.extend(
-                (f'{k[1:]} desc' if k.startswith('-') else k) 
+                (f'{k[1:]} desc' if k.startswith('-') else k)
                 for k in query_val.split(',') if re.match(r'-?[\w]+', k)
             )
         elif '.' not in query_key:
@@ -120,7 +122,7 @@ def make_sub_clause(query) -> tuple:
     for field_name, filter_val in filter_map.items():
         filter_text = FILTER_MAP[filter_val].replace('<field>', field_name)
         where_clause += ('WHERE' if not where_clause else 'AND')\
-                        + f' ({filter_text}) '
+            + f' ({filter_text}) '
     if 'offset' in limit_map:
         limit_clause += ' offset %d' % int(limit_map['offset'])
     return value_map, limit_map, where_clause, order_clause, limit_clause

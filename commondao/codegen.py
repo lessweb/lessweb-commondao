@@ -1,9 +1,15 @@
-from lesscli import add_argument
+import asyncio
 import os
-from pathlib import Path
 import re
+
+from lesscli import add_argument
+from lessweb import Bridge
+
+from commondao.mapper import Mysql, mysql_cleanup, mysql_startup
+from commondao.utils.grammar import (guess_py_type, is_column_sql,
+                                     is_unique_key_sql, parse_column_sql,
+                                     parse_unique_key_sql)
 from commondao.utils.templates import render_class_frame, render_class_methods
-from commondao.utils.grammar import is_column_sql, parse_column_sql, guess_py_type, is_unique_key_sql, parse_unique_key_sql
 
 
 def parse_create_table_sql(sql_content, entity_filename):
@@ -31,12 +37,31 @@ def parse_create_table_sql(sql_content, entity_filename):
     return table_name, col_items, unique_keys
 
 
-@add_argument('--schemadir',
-              default='schema',
-              help='schema direcotry, default: schema',
+async def get_create_table_sqls(confpath, prefix: str):
+    result = []  # list[table_name, sql_content]
+    os.environ['LOGGER_STREAM'] = 'stdout'
+    bridge = Bridge(config=confpath)
+    mysql = Mysql(bridge.app)
+    await mysql_startup(bridge.app, mysql)
+    async with mysql.pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute('show tables')
+            rows = await cur.fetchall()
+            for table_name, *_ in rows:
+                if table_name.startswith(prefix) and table_name != 'alembic_version':
+                    await cur.execute(f'show create table `{table_name}`')
+                    result.append(await cur.fetchone())
+    await mysql_cleanup(mysql)
+    return result
+
+
+@add_argument('--confpath',
+              default='config.toml',
+              help='config file path, default: config.toml',
               required=False)
+@add_argument('--prefix', default='tbl_', help='table name prefix, default: "tbl_"', required=False)
 @add_argument('--output', help='mapper file for output', dest='outfile')
-def run_codegen(schemadir, outfile):
+def run_codegen(confpath, prefix, outfile):
     """
     Generate CommonDao source code
     """
@@ -44,13 +69,11 @@ def run_codegen(schemadir, outfile):
     #   col_items: dict[name, (py_type, comment)]
     #   unique_keys: list[list[str]]
     class_body_blocks = []
-    entity_filenames = os.listdir(schemadir)
-    schema_path = Path(schemadir)
-    for entity_filename in entity_filenames:
-        entity_name = entity_filename.split('.', 1)[0]
-        sql_content = (schema_path / entity_filename).open().read()
+    create_table_sqls = asyncio.run(get_create_table_sqls(confpath, prefix))
+    for table_name, sql_content in create_table_sqls:
+        entity_name = table_name.removeprefix(prefix)
         table_name, col_items, unique_keys = parse_create_table_sql(
-            sql_content, entity_filename)
+            sql_content, table_name)
         class_methods = render_class_methods(table_name, entity_name,
                                              col_items, unique_keys)
         class_body_blocks.append(class_methods)
