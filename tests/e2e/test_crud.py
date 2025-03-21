@@ -10,7 +10,7 @@ from aiohttp.web import Request
 from pydantic import BaseModel, computed_field
 
 from commondao.mapper import (EXECUTE, Mapper, Mysql, Paged, RawSql,
-                              is_query_dict, is_row_dict, validate_row)
+                              is_row_dict, validate_row)
 from lessweb import Bridge
 from lessweb.annotation import Delete, Get, Post, Put
 
