@@ -1,71 +1,155 @@
+import inspect
 import logging
 import re
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from re import Match
-from typing import TypeVar
+from types import MappingProxyType
+from typing import (Annotated, Any, Callable, Generic, List, Literal, Mapping,
+                    Optional, Type, TypeGuard, TypeVar, Union)
 
 import aiomysql  # type: ignore
+import orjson
 from aiohttp.web import Application, Request
 from aiomysql import Connection, Cursor, DictCursor, Pool
-from lessweb.bridge import config, service
+from pydantic import BaseModel
 
-from commondao.utils.common import and_, join, script, where
+from lessweb import Middleware, Module, TypeCast, load_module_config
+from lessweb.typecast import is_list_type
 
 T = TypeVar('T')
+U = TypeVar("U", bound=BaseModel)
 
 SELECT_ONE = 1
 SELECT_ALL = 2
 EXECUTE = 3
 
+RowValueNotNull = Union[
+    str,
+    int,
+    # For NULL values in the database, it will return Python's None.
+    float,
+    # For MySQL fields of type DECIMAL and NUMERIC, it will return a decimal.Decimal object. e.g. "SELECT CAST(1234.56 AS DECIMAL(10,2)) AS dec_val"
+    Decimal,
+    # For fields of type BINARY, VARBINARY, or BLOB, it might return a bytes object.
+    bytes,
+    # For fields of type DATETIME or TIMESTAMP, it returns a Python datetime.datetime object.
+    datetime,
+    date,
+    time,
+    # e.g. "SELECT TIMEDIFF('12:00:00', '11:30:00') AS time_diff"
+    timedelta,
+]
+RowDict = Mapping[str, RowValueNotNull | None]
+# e.g. "... WHERE id in :ids" ids=[1, 2, 3] or (1, 2, 3)
+QueryDict = Mapping[str, RowValueNotNull | None | list | tuple]
 
-FILTER_MAP = {
-    'eq': '`<field>`=:<field>.value',  # eq是默认的filter，可以省略
-    'like': "`<field>` like :<field>.value",
-    'between': '`<field>` between :<field>.value and :<field>.end',
-    'ne': '`<field>` <> :<field>.value',
-    'lt': '`<field>` < :<field>.value',
-    'gt': '`<field>` > :<field>.value',
-    'lte': '`<field>` <= :<field>.value',
-    'gte': '`<field>` >= :<field>.value',
-    'in': '`<field>` in :<field>.value',
-}
+
+def is_row_dict(data: Mapping, /) -> TypeGuard[RowDict]:
+    for value in data.values():
+        if value is None:
+            continue
+        elif isinstance(value, (str, int, float, Decimal, bytes, datetime, date, time, timedelta)):
+            continue
+        else:
+            return False
+    return True
 
 
-@config
-class Mysql:
-    app: Application
+def is_query_dict(data: Mapping, /) -> TypeGuard[QueryDict]:
+    for value in data.values():
+        if value is None:
+            continue
+        elif isinstance(value, (str, int, float, Decimal, bytes, datetime, date, time, timedelta, list, tuple)):
+            continue
+        else:
+            return False
+    return True
+
+
+@dataclass
+class Paged(Generic[T]):
+    items: List[T]
+    page: Optional[int] = None
+    size: Optional[int] = None
+    total: Optional[int] = None
+
+
+@dataclass
+class RawSql:
+    sql: str
+
+
+def script(*segs) -> str:
+    return ' '.join(seg or '' for seg in segs)
+
+
+def join(*segs) -> str:
+    return ','.join(seg or '' for seg in segs)
+
+
+def and_(*segs) -> str:
+    ret = ' and '.join(seg or '' for seg in segs).strip()
+    return f'({ret})' if ret else ''
+
+
+def where(*segs) -> str:
+    sql = and_(*segs)
+    return f'where {sql} ' if sql else ''
+
+
+def validate_row(row: RowDict, model: Type[U]) -> U:
+    """
+    - 如果item_type是list|BaseModel，则orjson.loads
+    - 如果item是字符串，则TypeCase.validate_query
+    - 最后再.model_validate
+    """
+    data = {}
+    model_fields = model.model_fields
+    for row_key, row_value in row.items():
+        tp = model_fields[row_key].annotation
+        if isinstance(row_value, str) and tp is not str and tp is not None:
+            if is_list_type(tp) or (inspect.isclass(tp) and issubclass(tp, BaseModel)):
+                data[row_key] = orjson.loads(row_value)
+            else:
+                data[row_key] = TypeCast.validate_query(row_value, tp)
+        else:
+            data[row_key] = row_value
+    return model.model_validate(data)
+
+
+class MysqlConfig(BaseModel):
+    pool_recycle: int = 60
+    host: str
+    port: int = 3306
+    user: str
+    password: str
+    db: str
+    echo: bool = True
+    autocommit: bool = True
+    maxsize: int = 20
+    page_size: int = 10
+
+
+class Mysql(Module):
     pool: Pool
+    page_size: int
 
-    def __init__(self, app: Application):
-        self.app = app
+    async def on_startup(self, app: Application):
+        config = self.load_config(app)
+        self.page_size = config.page_size
+        config_dict = config.model_dump()
+        del config_dict['page_size']
+        self.pool = await aiomysql.create_pool(**config_dict)
+        logging.debug('add middlewares-> mapper_on_request')
 
+    async def on_cleanup(self, app: Application):
+        self.pool.close()
+        await self.pool.wait_closed()
 
-async def mysql_startup(app: Application, mysql: Mysql):
-    mysql.pool = await aiomysql.create_pool(**app['config']['mysql'])
-
-
-async def mysql_cleanup(mysql: Mysql):
-    mysql.pool.close()
-    await mysql.pool.wait_closed()
-
-
-@service
-class MysqlConn:
-    request: Request
-    mysql: Mysql
-    conn: Connection
-    cur: Cursor
-
-    def __init__(self, request: Request, mysql: Mysql):
-        self.request = request
-        self.mysql = mysql
-
-
-async def mysql_connect(handler, mysql_conn: MysqlConn):
-    async with mysql_conn.mysql.pool.acquire() as conn:
-        mysql_conn.conn = conn
-        async with conn.cursor(DictCursor) as cur:
-            mysql_conn.cur = cur
-            return await handler()
+    def load_config(self, app: Application) -> Annotated[MysqlConfig, 'mysql']:
+        return load_module_config(app, 'mysql', MysqlConfig)
 
 
 class RegexCollect:
@@ -79,94 +163,63 @@ class RegexCollect:
         self.words.append(word[2:])
         return word[0] + '%s'
 
-    def build(self, sql: str, params: dict) -> tuple:
+    def build(self, sql: str, params: Mapping[str, Any]) -> tuple:
         pattern = r"[^:]:[a-zA-Z][\w.]*"
         pg_sql = re.sub(pattern, self.repl, sql)
         pg_params = tuple(params[k] for k in self.words)
         return pg_sql, pg_params
 
 
-def make_sub_clause(query) -> tuple:
-    """
-    query: Dict | MutableMapping
-    return: (value_map, limit_map, where_clause, order_clause, limit_clause)
-    """
-    filter_map = {}  # filter_map[query_key] = filter
-    limit_map = {'limit': 0}
-    orderby_rules = []
-    value_map = {}
-    for query_key, query_val in query.items():
-        if query_key == 'limit':
-            limit_map['limit'] = int(query_val)
-        elif query_key == 'offset':
-            limit_map['offset'] = int(query_val)
-        elif query_key == 'order':
-            orderby_rules.extend(
-                (f'{k[1:]} desc' if k.startswith('-') else k)
-                for k in query_val.split(',') if re.match(r'-?[\w]+', k)
-            )
-        elif '.' not in query_key:
-            filter_map.setdefault(query_key, 'eq')
-            value_map[f'{query_key}.value'] = query_val
-        elif query_key.endswith('.value'):
-            filter_map.setdefault(query_key[:-6], 'eq')
-            value_map[query_key] = query_val
-        elif query_key.endswith('.filter'):
-            assert query_val in FILTER_MAP
-            filter_map[query_key[:-7]] = query_val
-        else:
-            value_map[query_key] = query_val
-    where_clause = ''
-    order_clause = ', '.join(orderby_rules)
-    limit_clause = 'limit %d' % int(limit_map['limit'])
-    for field_name, filter_val in filter_map.items():
-        filter_text = FILTER_MAP[filter_val].replace('<field>', field_name)
-        where_clause += ('WHERE' if not where_clause else 'AND')\
-            + f' ({filter_text}) '
-    if 'offset' in limit_map:
-        limit_clause += ' offset %d' % int(limit_map['offset'])
-    return value_map, limit_map, where_clause, order_clause, limit_clause
+class Mapper(Middleware):
+    mysql: Mysql
+    conn: Connection
+    cur: Cursor
 
+    def __init__(self, mysql: Mysql):
+        self.mysql = mysql
 
-@service
-class Mapper:
-    conn: MysqlConn
-
-    def __init__(self, conn: MysqlConn):
-        self.conn = conn
+    async def on_request(self, request: Request, handler: Callable):
+        async with self.mysql.pool.acquire() as conn:
+            self.conn = conn
+            async with conn.cursor(DictCursor) as cur:
+                self.cur = cur
+                return await handler(request)
 
     async def commit(self):
-        await self.conn.conn.commit()
+        await self.conn.commit()
 
-    async def execute(self, mode, sql: str, data: dict):
-        cursor = self.conn.cur
+    def lastrowid(self) -> int:
+        return self.cur.lastrowid
+
+    async def execute(self, mode, sql: str, data: Mapping[str, Any] = MappingProxyType({})):
+        cursor = self.cur
         logging.debug(sql)
         pg_sql, pg_params = RegexCollect().build(sql, data)
-        logging.debug('%s => %s', pg_sql, pg_params)
+        logging.debug('execute: %s => %s', pg_sql, pg_params)
         await cursor.execute(pg_sql, pg_params)
         if mode == SELECT_ONE:
-            return await cursor.fetchone() or {}
+            return await cursor.fetchone()
         elif mode == SELECT_ALL:
             return await cursor.fetchall() or []
         else:
             return cursor.rowcount
 
-    async def select_one(self, sql: str, data: dict):
+    async def select_one(self, sql: str, data: QueryDict = MappingProxyType({})) -> Optional[RowDict]:
         return await self.execute(SELECT_ONE, sql, data)
 
-    async def select_all(self, sql: str, data: dict):
+    async def select_all(self, sql: str, data: QueryDict = MappingProxyType({})) -> List[RowDict]:
         return await self.execute(SELECT_ALL, sql, data)
 
-    async def insert(self, sql: str, data: dict):
+    async def insert(self, sql: str, data: QueryDict) -> int:
         return await self.execute(EXECUTE, sql, data)
 
-    async def update(self, sql: str, data: dict):
+    async def update(self, sql: str, data: QueryDict) -> int:
         return await self.execute(EXECUTE, sql, data)
 
-    async def delete(self, sql: str, data: dict):
+    async def delete(self, sql: str, data: QueryDict) -> int:
         return await self.execute(EXECUTE, sql, data)
 
-    async def save(self, tablename: str, *, data: dict):
+    async def save(self, tablename: str, *, data: RowDict) -> int:
         selected_data = {
             key: value
             for key, value in data.items() if value is not None
@@ -182,7 +235,7 @@ class Mapper:
         )
         return await self.insert(sql, selected_data)
 
-    async def update_by_key(self, tablename, *, key: dict, data: dict):
+    async def update_by_key(self, tablename, *, key: QueryDict, data: RowDict) -> int:
         selected_data = {
             key: value
             for key, value in data.items() if value is not None
@@ -199,7 +252,7 @@ class Mapper:
         )
         return await self.update(sql, {**data, **key})
 
-    async def delete_by_key(self, tablename, *, key: dict):
+    async def delete_by_key(self, tablename, *, key: QueryDict) -> int:
         sql = script(
             'delete from',
             tablename,
@@ -208,49 +261,50 @@ class Mapper:
         )
         return await self.delete(sql, key)
 
-    async def get_by_key(self, tablename, *, key: dict):
+    async def get_by_key(self, tablename, *, key: QueryDict) -> Optional[RowDict]:
         sql = script('select * from', tablename,
                      where(and_(*[f'`{k}`=:{k}' for k in key.keys()])),
                      'limit 1')
         return await self.select_one(sql, key)
 
-    async def select_by_query(self,
-                              tablename,
-                              query,
-                              select_clause: str = '*',
-                              extra: dict = None):
-        """
-        输入：
-            query: Dict | MutableMapping
-            extra: Dict
-        保留字：limit, offset, .value, .field, .order, <field>
-        <field>.value: 可以省略.value
-        <field>.filter: 语法例如"<field> between <value> and <end>"或者"<filter> >= <value>"
-        <field>.order: 值可取"asc|desc"(不支持大写)
-        tablename分为表名模式和完整模式，完整模式包含最多一个<select>, <where>, <order>, <limit>
-        如果传入的limit=0，则只查询总数；如果不传limit或limit is None，则不分页；否则正常分页查询。
-        """
-        value_map, limit_map, where_clause, order_clause, limit_clause = make_sub_clause(
-            query)
-        count_sql = script(
-            'SELECT COUNT(*) AS total FROM',
-            tablename,
-            where_clause,
-        )
-        if extra:
-            value_map.update(extra)
-        count_ret = await self.select_one(count_sql, value_map)
-        assert select_clause == '*' or re.match(
-            r'[\w,` ]+',
-            select_clause), f'Invalid select_clause: {select_clause}'
-        records_sql = script(
-            'SELECT',
-            select_clause,
-            'FROM',
-            tablename,
-            where_clause,
-            f'ORDER BY {order_clause}' if order_clause else '',
-            limit_clause,
-        )
-        records = await self.select_all(records_sql, value_map)
-        return {**count_ret, **limit_map, 'list': records}
+    async def select_paged(
+            self,
+            sql: str,
+            select: Type[U],
+            data: QueryDict,
+            page: int = 1,
+            size: Union[int, Literal['DEFAULT', 'ALL']] = 'DEFAULT',
+    ) -> Paged[U]:
+        assert sql.lower().startswith('select * from')
+        headless_sql = sql[13:]
+        page = max(1, page)
+        if size == 'DEFAULT':
+            size = self.mysql.page_size
+        select_items: List[str] = []
+        for name, info in select.model_fields.items():
+            for metadata in info.metadata:
+                if isinstance(metadata, RawSql):
+                    select_items.append(f'({metadata.sql}) as `{name}`')
+                    break
+            else:  # else-for
+                select_items.append(f'`{name}`')
+            # end-for
+        select_clause = 'select %s from ' % ', '.join(select_items)
+        sql = f'{select_clause} {headless_sql}'
+        if size == 'ALL':
+            rows = await self.select_all(sql, data)
+            models = [validate_row(row, select) for row in rows]
+            return Paged(items=models)
+        assert isinstance(size, int) and size > 0
+        count_sql = f'select count(*) as total from {headless_sql}'
+        count_result = await self.select_one(count_sql, data)
+        assert count_result is not None, "count result should not be None"
+        total: int = count_result['total']  # type: ignore
+        offset = (page - 1) * size
+        limit_clause = 'limit %d' % size
+        if offset:
+            limit_clause += ' offset %d' % offset
+        sql = f'{select_clause} {headless_sql} {limit_clause}'
+        rows = await self.select_all(sql, data)
+        models = [validate_row(row, select) for row in rows]
+        return Paged(models, page, size, total)

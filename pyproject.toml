@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lessweb-commondao"
-version = "1.1.0"
+version = "2.0.0"
 description = 'Mysql service and toolkit for lessweb'
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 keywords = ['lessweb', 'mysql']
 authors = [
     {name = "qorzj", email = "goodhorsezxj@gmail.com"},
@@ -15,11 +15,28 @@ authors = [
 license = {text = "Apache 2"}
 dependencies = [
     'aiohttp',
-    'lesscli',
     'lessweb',
     'mysql-connector',
     'aiomysql'
 ]
 
-[project.scripts]
-commondao = "commondao.index:main"
+[project.optional-dependencies]
+test = [
+    "autopep8",
+    "mypy",
+    "coverage",
+    "pytest",
+    "pytest-cov",
+    "pytest-mock",
+    "pytest-asyncio",
+    "pytest-aiohttp",
+    "types-toml",
+]
+
+[tool.setuptools.package-data]
+"commondao" = ["py.typed"]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = false

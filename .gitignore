@@ -92,3 +92,5 @@ ENV/
 .DS_Store
 .mypy_cache
 __target__/
+lessweb/
+/config.toml
